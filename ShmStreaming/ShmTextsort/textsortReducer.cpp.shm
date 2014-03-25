@@ -1,0 +1,70 @@
+#include "../HadoopShmTool/SharedMemoryOperator.h"
+#include <sstream>
+#include <cstdlib>
+
+using namespace std;
+
+stringstream ss;
+string KV;
+char* kvpair;
+SharedMemoryOperator* reader;
+SharedMemoryOperator* writer;
+
+void reduce(string key, long value);
+
+int main(int argc, char * argv[]){
+	string key;
+	long value;
+	string sline;
+	string skey;
+	string svalue;
+
+	try{
+	  	reader = new SharedMemoryOperator(8192);
+		writer = new SharedMemoryOperator(8192);
+	} catch(exception & ex){
+	  	delete(reader);
+		delete(writer);
+		return EXIT_FAILURE;
+	}
+
+	int buffersize = reader->getBufferSize();
+	int rcnt = 0;
+	char* data;
+	data = (char *)malloc(buffersize);
+	memset(data, '0', buffersize);
+
+	while( true ){
+		rcnt = reader->readSharedMemory(data);
+		if(rcnt == -1){
+		  	writer->writeSharedMemory(NULL, -1);
+			break;
+		} 
+		else if(rcnt == 0)
+		  	continue;
+		sline.assign(data, rcnt);
+		int splitpos = sline.find("\t");
+		skey = sline.substr(0, splitpos);
+		svalue = sline.substr(splitpos + 1);
+
+		key = skey;
+		value = atol(svalue.c_str());
+
+		reduce(key, value);
+	}
+
+	delete(reader);
+	delete(writer);
+	free(data);
+
+	return 0;
+}
+
+void reduce(string key, long value){
+	ss.str("");
+	//cout << key << "\t" << " " << endl;
+	ss << key << "\t" << " ";
+	KV = ss.str();
+	kvpair = const_cast<char *>(KV.c_str());
+	writer->writeSharedMemory(kvpair, KV.size());
+}

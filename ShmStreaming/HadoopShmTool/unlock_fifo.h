@@ -1,0 +1,199 @@
+/*
+ * =====================================================================================
+ *
+ *       Filename:  unlock_fifo.h
+ *
+ *    Description:  This is a simple lock-free fifo
+ *
+ *        Version:  1.0
+ *        Created:  2012年01月06日 11时06分52秒
+ *       Revision:  none
+ *       Compiler:  gcc
+ *
+ *         Author:  Robeenly (), robeenly@gmail.com
+ *        Company:  SJTU
+ *
+ * =====================================================================================
+ */
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <semaphore.h>
+#include <time.h>
+
+//#define TIME_TO_UNLOCK_EMPTY_SEM 300
+//#define TIME_TO_UNLOCK_FULL_SEM 300
+
+typedef struct ufifo{
+    unsigned int stat;
+    unsigned int stat_full;
+    unsigned int stat_empty;
+    unsigned int in; // This is the in queue pointer
+    unsigned int out; // This is the out queue pointer
+    unsigned int mask;  // This is the mask for limit the visit of the fifo queue
+    int key; //Using the call process's pid as the generation of semaphore
+    unsigned int TIME_TO_UNLOCK_FULL_SEM;
+    unsigned int TIME_TO_UNLOCK_EMPTY_SEM;
+    unsigned int times_empty;
+    unsigned int times_full;
+}SUFIFO, *PUFIFO;
+
+#define LENOFF 0
+#define DATAOFF (LENOFF + sizeof(SUFIFO))
+
+
+static inline unsigned int MIN(unsigned int a, unsigned int b)
+{
+    return ((a <= b) ? a : b);
+}
+
+static inline unsigned int ufifo_unused(PUFIFO fifo)
+{
+    return (fifo->mask + 1) - (fifo->in - fifo->out);
+}
+
+static inline PUFIFO ufifo_init(void* shm, unsigned int size, int semkey, 
+	unsigned int to_unlock_empty_sem, unsigned int to_unlock_full_sem)
+{
+    if(shm == NULL || size < 2){
+        return NULL;
+    }
+
+    PUFIFO fifo;
+    fifo = (PUFIFO)shm;
+    fifo->mask = size - 1;
+    if(fifo->stat != 1){
+    	fifo->in = 0;
+    	fifo->out = 0;
+    	fifo->stat = 1;
+	fifo->stat_empty = 0;
+	fifo->stat_full = 0;
+	fifo->key = semkey;
+	fifo->TIME_TO_UNLOCK_EMPTY_SEM = to_unlock_empty_sem;
+	fifo->TIME_TO_UNLOCK_FULL_SEM = to_unlock_full_sem;
+	fifo->times_empty = 0;
+	fifo->times_full = 0;
+    	// Initiate the semaphore
+    }
+    return fifo;
+}
+
+
+static inline PUFIFO ufifo_reset(PUFIFO fifo, void* shm)
+{
+    PUFIFO pfifo = fifo;
+    unsigned int size = pfifo->mask + 1;
+    int semkey = pfifo->key;
+    unsigned int to_unlock_empty_sem = pfifo->TIME_TO_UNLOCK_EMPTY_SEM;
+    unsigned int to_unlock_full_sem = pfifo->TIME_TO_UNLOCK_FULL_SEM;
+    pfifo = ufifo_init(shm, size, semkey, to_unlock_empty_sem, to_unlock_full_sem);
+    return pfifo;
+}
+
+//static inline void ufifo_free(PUFIFO fifo);
+
+static inline void ufifo_copy_in(PUFIFO fifo, const void *src,
+                            unsigned int len, unsigned int off)
+{ // The copy inqueue function
+    unsigned int size = fifo->mask + 1;
+    unsigned int l;
+    char *data = (char *)fifo + DATAOFF;
+
+    off &= fifo->mask;
+
+    l = MIN(len, size - off);
+    memcpy(data + off, (char *)src, l);
+    memcpy(data, (char *)src + l, len - l);
+
+}
+
+unsigned int ufifo_in(PUFIFO fifo, const void * buf, unsigned int len, sem_t * sem_empty, sem_t * sem_full)
+{
+    unsigned int l = 0;
+    l = ufifo_unused(fifo);
+    if(l == 0){ // That means buffer is full
+      	//fprintf(debug, "The writer is going to block since buffer is full!\n");
+	fifo->stat_full = 1;
+	//__sync_val_compare_and_swap(&fifo->stat_full, 0, 1);
+	//if(__sync_val_compare_and_swap(&fifo->stat_empty, 1, 0) == 1){
+	if(fifo->stat_empty == 1){
+		fifo->stat_empty = 0;
+		fifo->times_empty = 0;
+    		sem_post(sem_empty);
+	}
+   	sem_wait(sem_full);
+    }
+    if(len > l)
+    	len = l;
+    ufifo_copy_in(fifo, buf, len, fifo->in);
+    fifo->in += len;
+    //fprintf(debug, "After writing %d bytes, current fifo: fifo -> in = %u; fifo->out = %u.\n", len, fifo->in, fifo->out);
+    // This means before current write, the fifo is empty, and maybe the reader is blocked 
+    if(fifo->stat_empty == 1){
+      	//fprintf(debug, "Writer post to wait up potential blocked reader.\n");
+      	fifo->times_empty++;
+	if(fifo->times_empty >= fifo->TIME_TO_UNLOCK_EMPTY_SEM){
+	  	fifo->times_empty = 0;
+	//	__sync_val_compare_and_swap(&fifo->stat_empty, 1, 0);
+		fifo->stat_empty = 0;
+    		sem_post(sem_empty);
+	}
+    }
+
+    return len;
+}
+
+static inline void ufifo_copy_out(PUFIFO fifo, void* dst,
+                      unsigned int len, unsigned int off)
+{
+    unsigned int size = fifo->mask + 1;
+    unsigned int l = 0;
+    char *data = (char *)fifo + DATAOFF;
+    off &= fifo->mask;
+    l = MIN(len, size - off);
+    memcpy((char *)dst, data + off, l);
+    memcpy((char *)dst + l, data, len - l);
+}
+
+unsigned int ufifo_out(PUFIFO fifo, void * buf, unsigned int len, sem_t * sem_empty, sem_t * sem_full){ // The outqueue function
+    unsigned int l;
+    l = fifo->in - fifo->out;
+    if(l == 0){ // Means nothing to read
+      	//fprintf(debug, "The reader is going to block since buffer is empty!\n");
+	fifo->stat_empty = 1;
+	//__sync_val_compare_and_swap(&fifo->stat_empty, 0, 1);
+		//fifo->stat_full = 0;
+	//if(__sync_val_compare_and_swap(&fifo->stat_full, 1, 0) == 1){
+	if(fifo->stat_full == 1){
+	  	fifo->stat_full = 0;
+	  	fifo->times_full = 0;
+		sem_post(sem_full);
+	}
+    	sem_wait(sem_empty);
+    }
+    if(len > l)
+    	len = l;
+    ufifo_copy_out(fifo, buf, len, fifo->out);
+    fifo->out += len;
+
+    //fprintf(debug, "After reading %d bytes, current fifo: fifo -> in = %u; fifo->out = %u.\n", len, fifo->in, fifo->out);
+    // This means before current read, the fifo is full, and maybe the writer is blocked
+    if(fifo->stat_full == 1){
+      	//fprintf(debug, "Reader post to wait up potential blocked reader.\n");
+      	fifo->times_full++;
+	if(fifo->times_full >= fifo->TIME_TO_UNLOCK_FULL_SEM){
+	  	fifo->times_full = 0;
+		fifo->stat_full = 0;
+		//__sync_val_compare_and_swap(&fifo->stat_full, 1, 0);
+		sem_post(sem_full);
+	}
+    }
+    return len;
+
+}
+
+

@@ -1,0 +1,96 @@
+#include "SharedMemoryOperator.h"
+#include "LineSpliter.h"
+#include <sstream>
+#include <fstream>
+
+using namespace std;
+
+string K;
+long V;
+string KV;
+char* kvpair;
+stringstream strstream;
+SharedMemoryOperator* reader;
+SharedMemoryOperator* writer;
+ofstream fout;
+
+void reduce(string key, long value);
+
+int main(int argc, char * argv[]){
+  	//fout.open("/home/robeen/Source/debug_reduce", fstream::app);
+	string line;
+	try{
+		reader = new SharedMemoryOperator();
+		writer = new SharedMemoryOperator();
+	} catch (exception & ex){
+	  	delete(reader);
+		delete(writer);
+		return EXIT_FAILURE;
+	}
+	int rcnt = 0;
+
+	//getline(cin, line);
+	int buffersize = reader->getBufferSize();
+	char* data;
+	data = (char *)malloc(buffersize);
+	memset(data, '0', buffersize);
+
+	rcnt = reader->readSharedMemory(data);
+	line.assign(data, rcnt);
+
+	int splitpos = line.find('\t');
+	string ks = line.substr(0, splitpos);
+	string vs = line.substr(splitpos + 1);
+
+	K = ks;
+	V = atol(vs.c_str());
+      //  while( getline(cin, line) ){
+	while( true ){
+	  	rcnt = reader->readSharedMemory(data);
+		//fout << "Read " << rcnt << " bytes of data from fifo!" << endl;
+		if(rcnt == -1){
+			if( K.compare("") != 0 ){
+				//cout << K << "\t" << V << endl;
+				strstream << K << "\t" << V;
+				KV = strstream.str();
+				kvpair = const_cast<char *>(KV.c_str());
+				writer->writeSharedMemory(kvpair, KV.size());
+				strstream.str("");
+			}
+		  	writer->writeSharedMemory(NULL, -1);
+			break;
+		}
+		else if(rcnt == 0)
+		  	continue;
+		line.assign(data, rcnt);
+		splitpos = line.find('\t');
+		ks = line.substr(0, splitpos);
+		vs = line.substr(splitpos + 1);
+
+		string key = ks;
+		long value = atol(vs.c_str());
+
+		if( K.compare(key) == 0 ){
+			V += value;
+		}
+		else{
+			//cout << K << "\t" << V << endl;
+			strstream << K << "\t" << V;
+			KV = strstream.str();
+			kvpair = const_cast<char *>(KV.c_str());
+			writer->writeSharedMemory(kvpair, KV.size());
+			strstream.str("");
+
+			K = key;
+			V = value;
+		}
+	}
+	//if(K.compare("") != 0){
+	//  	cout << K << "\t" << V << endl;
+//	}
+	delete(reader);
+	delete(writer);
+	free(data);
+	//fout.close();
+	return 0;
+}
